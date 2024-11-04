@@ -1,1 +1,1 @@
-# Assignment 4: Facualoty and ChatGPT
+# Assignment 4: Factualoty and ChatGPT
