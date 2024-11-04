@@ -1,1 +1,1 @@
-# Assignment 4: Factualoty and ChatGPT
+# Assignment 4: Factuality and ChatGPT
