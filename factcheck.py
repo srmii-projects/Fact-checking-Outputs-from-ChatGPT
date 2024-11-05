@@ -66,15 +66,19 @@ class AlwaysEntailedFactChecker(FactChecker):
 
 class WordRecallThresholdFactChecker(FactChecker):
     def predict(self, fact: str, passages: List[dict]) -> str:
+        # Define stop words using nltk's set, but avoid tokenization that depends on 'punkt'
         stop_words = set(stopwords.words('english'))
-        fact_tokens = set(word_tokenize(fact.lower())) - stop_words
+        
+        # Tokenize fact and passages by splitting on whitespace
+        fact_tokens = set(fact.lower().split()) - stop_words
         best_score = 0
 
         for passage in passages:
-            passage_tokens = set(word_tokenize(passage['text'].lower())) - stop_words
+            passage_tokens = set(passage['text'].lower().split()) - stop_words
             score = len(fact_tokens & passage_tokens) / len(fact_tokens | passage_tokens)
             best_score = max(best_score, score)
         
+        # Classify as "Supported" if overlap is above threshold
         return "S" if best_score > 0.5 else "NS"
 
 
