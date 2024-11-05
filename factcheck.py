@@ -14,15 +14,6 @@ nltk.download('stopwords')
 nltk.download('punkt')
 
 class FactExample:
-    """
-    :param fact: A string representing the fact to make a prediction on
-    :param passages: List[dict], where each dict has keys "title" and "text". "title" denotes the title of the
-    Wikipedia page it was taken from; you generally don't need to use this. "text" is a chunk of text, which may or
-    may not align with sensible paragraph or sentence boundaries
-    :param label: S, NS, or IR for Supported, Not Supported, or Irrelevant. Note that we will ignore the Irrelevant
-    label for prediction, so your model should just predict S or NS, but we leave it here so you can look at the
-    raw data.
-    """
     def __init__(self, fact: str, passages: List[dict], label: str):
         self.fact = fact
         self.passages = passages
@@ -34,30 +25,31 @@ class FactExample:
 
 class EntailmentModel:
     def __init__(self):
-        # Load the pre-trained DeBERTa model for entailment tasks
         self.tokenizer = AutoTokenizer.from_pretrained("microsoft/deberta-v3-base")
         self.model = AutoModelForSequenceClassification.from_pretrained("microsoft/deberta-v3-base")
 
     def check_entailment(self, premise: str, hypothesis: str):
         with torch.no_grad():
-            # Tokenize the premise and hypothesis
             inputs = self.tokenizer(premise, hypothesis, return_tensors='pt', truncation=True, padding=True)
-            # Get the model's prediction
             outputs = self.model(**inputs)
             logits = outputs.logits
-            entailment_score = torch.softmax(logits, dim=-1)[0][2].item()  # Entailment class score
+            num_classes = logits.size(-1)
+
+            # Handle cases where logits are size 2 or 3 (binary or multi-class classification)
+            if num_classes == 3:
+                entailment_score = torch.softmax(logits, dim=-1)[0][2].item()  # Score for "entailment"
+            elif num_classes == 2:
+                entailment_score = torch.sigmoid(logits[0][1]).item()  # Binary entailment score
+            else:
+                raise ValueError(f"Unexpected number of classes: {num_classes}")
+            
             return entailment_score
 
-        # To prevent out-of-memory (OOM) issues during autograding, we explicitly delete
-        # objects inputs, outputs, logits, and any results that are no longer needed after the computation.
         del inputs, outputs, logits
         gc.collect()
 
 
 class FactChecker:
-    """
-    Fact checker base type
-    """
     def predict(self, fact: str, passages: List[dict]) -> str:
         raise Exception("Don't call me, call my subclasses")
 
@@ -83,7 +75,6 @@ class WordRecallThresholdFactChecker(FactChecker):
             score = len(fact_tokens & passage_tokens) / len(fact_tokens | passage_tokens)
             best_score = max(best_score, score)
         
-        # Classify as "Supported" if overlap is above threshold
         return "S" if best_score > 0.5 else "NS"
 
 
@@ -97,7 +88,6 @@ class EntailmentFactChecker(FactChecker):
             entailment_score = self.ent_model.check_entailment(fact, passage['text'])
             best_score = max(best_score, entailment_score)
         
-        # Classify as "Supported" if entailment score is above threshold
         return "S" if best_score > 0.7 else "NS"
 
 
@@ -110,14 +100,6 @@ class DependencyRecallThresholdFactChecker(FactChecker):
         raise Exception("Implement me")
 
     def get_dependencies(self, sent: str):
-        """
-        Returns a set of relevant dependencies from sent
-        :param sent: The sentence to extract dependencies from
-        :param nlp: The spaCy model to run
-        :return: A set of dependency relations as tuples (head, label, child) where the head and child are lemmatized
-        if they are verbs. This is filtered from the entire set of dependencies to reflect ones that are most
-        semantically meaningful for this kind of fact-checking
-        """
         processed_sent = self.nlp(sent)
         relations = set()
         for token in processed_sent:
