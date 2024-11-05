@@ -37,15 +37,18 @@ class EntailmentModel:
 
     def check_entailment(self, premise: str, hypothesis: str):
         with torch.no_grad():
+            # Tokenize the premise and hypothesis
             inputs = self.tokenizer(premise, hypothesis, return_tensors='pt', truncation=True, padding=True)
+            # Get the model's prediction
             outputs = self.model(**inputs)
             logits = outputs.logits
-
-        entailment_score = torch.softmax(logits, dim=-1)[0][0].item()
-
+            # Extract probabilities
+            entailment_score = torch.softmax(logits, dim=-1).squeeze().cpu().numpy()
+        # Clean up
         del inputs, outputs, logits
         gc.collect()
-
+        
+        # Return probability scores for entailment, neutral, contradiction
         return entailment_score
 
 
@@ -114,50 +117,27 @@ class WordRecallThresholdFactChecker(FactChecker):
         return "S" if max_similarity >= self.threshold else "NS"
 
 
-class EntailmentFactChecker(FactChecker):
-    def __init__(self, ent_model, overlap_threshold=0.2):
-        # Use the passed entailment model and tokenizer
-        self.model = ent_model.model
-        self.tokenizer = ent_model.tokenizer
-        # Initialize the word overlap checker with the specified threshold
-        self.overlap_checker = WordRecallThresholdFactChecker(threshold=overlap_threshold)
+class EntailmentFactChecker(object):
+    def __init__(self, ent_model):
+        self.ent_model = ent_model
 
-        # Move model to mixed precision on GPU if available
-        if torch.cuda.is_available():
-            self.model = self.model.half().to("cuda")
-
-    def predict(self, fact: str, passages: List[dict]) -> str:
-        max_entailment_score = 0.0
-
+    def predict(self, fact: str, passages: list) -> str:
+        max_entailment_score = 0.0  # Keep track of the highest entailment score
+        
         for passage in passages:
-            sentences = nltk.sent_tokenize(passage['text'])
-
+            sentences = passage['text'].split('.')  # Basic sentence split on periods
             for sentence in sentences:
-                # Check if sentence has sufficient overlap with the fact
-                overlap_score = self.overlap_checker.cosine_similarity(
-                    self.overlap_checker.vectorize(self.overlap_checker.preprocess(fact)),
-                    self.overlap_checker.vectorize(self.overlap_checker.preprocess(sentence))
-                )
-                if overlap_score < self.overlap_checker.threshold:
-                    continue  # Skip sentences with low overlap
-
-                # Perform entailment scoring on sentences that pass the overlap check
-                inputs = self.tokenizer(fact, sentence, return_tensors='pt', truncation=True, padding=True, max_length=128)
-                if torch.cuda.is_available():
-                    inputs = {k: v.to("cuda") for k, v in inputs.items()}
-
-                with torch.no_grad():
-                    outputs = self.model(**inputs)
-                    logits = outputs.logits
-                    entailment_prob = torch.softmax(logits, dim=-1)[0][0].item()  # Probability of entailment
-                    contradiction_prob = torch.softmax(logits, dim=-1)[0][2].item()  # Probability of contradiction
-
-                # Update max_entailment_score only if the sentence is more confidently entailing
-                if entailment_prob > 0.75 and contradiction_prob < 0.2:
+                if sentence.strip():  # Only process non-empty sentences
+                    # Obtain probabilities for entailment, neutral, contradiction
+                    entailment_prob, neutral_prob, contradiction_prob = self.ent_model.check_entailment(sentence, fact)
+                    # Update max entailment score
                     max_entailment_score = max(max_entailment_score, entailment_prob)
-
-        # Decision based on the maximum entailment score
-        return "S" if max_entailment_score >= 0.75 else "NS"
+                    # Early exit if we reach a high confidence in entailment
+                    if entailment_prob > 0.7:  # threshold for high-confidence entailment
+                        return "S"
+        
+        # If no sentence has high entailment probability, return "NS"
+        return "S" if max_entailment_score > 0.5 else "NS"
 
 # OPTIONAL
 class DependencyRecallThresholdFactChecker(object):
