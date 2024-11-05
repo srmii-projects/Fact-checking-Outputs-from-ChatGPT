@@ -6,9 +6,10 @@ import numpy as np
 import gc
 import spacy
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
-from collections import Counter
-import re
+from collections import Counter, defaultdict
+import re, math
 
+import nltk
 
 class FactExample:
     """
@@ -114,20 +115,49 @@ class WordRecallThresholdFactChecker(FactChecker):
 
 
 class EntailmentFactChecker(FactChecker):
-    def __init__(self, model_name="MoritzLaurer/DeBERTa-v3-base-mnli-fever-anli"):
-        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
-        self.model = AutoModelForSequenceClassification.from_pretrained(model_name)
-        self.entailment_model = EntailmentModel(self.model, self.tokenizer)  # Instantiate EntailmentModel correctly
+    def __init__(self, ent_model, overlap_threshold=0.2):
+        # Use the passed entailment model and tokenizer
+        self.model = ent_model.model
+        self.tokenizer = ent_model.tokenizer
+        # Initialize the word overlap checker with the specified threshold
+        self.overlap_checker = WordRecallThresholdFactChecker(threshold=overlap_threshold)
+
+        # Move model to mixed precision on GPU if available
+        if torch.cuda.is_available():
+            self.model = self.model.half().to("cuda")
 
     def predict(self, fact: str, passages: List[dict]) -> str:
         max_entailment_score = 0.0
+
         for passage in passages:
-            sentences = passage['text'].split('.')
+            sentences = nltk.sent_tokenize(passage['text'])
+
             for sentence in sentences:
-                entailment_score = self.entailment_model.check_entailment(fact, sentence)  # Use correctly instantiated model
-                max_entailment_score = max(max_entailment_score, entailment_score)
-        
-        return "S" if max_entailment_score >= 0.6 else "NS"
+                # Check if sentence has sufficient overlap with the fact
+                overlap_score = self.overlap_checker.cosine_similarity(
+                    self.overlap_checker.vectorize(self.overlap_checker.preprocess(fact)),
+                    self.overlap_checker.vectorize(self.overlap_checker.preprocess(sentence))
+                )
+                if overlap_score < self.overlap_checker.threshold:
+                    continue  # Skip sentences with low overlap
+
+                # Perform entailment scoring on sentences that pass the overlap check
+                inputs = self.tokenizer(fact, sentence, return_tensors='pt', truncation=True, padding=True, max_length=128)
+                if torch.cuda.is_available():
+                    inputs = {k: v.to("cuda") for k, v in inputs.items()}
+
+                with torch.no_grad():
+                    outputs = self.model(**inputs)
+                    logits = outputs.logits
+                    entailment_prob = torch.softmax(logits, dim=-1)[0][0].item()  # Probability of entailment
+                    contradiction_prob = torch.softmax(logits, dim=-1)[0][2].item()  # Probability of contradiction
+
+                # Update max_entailment_score only if the sentence is more confidently entailing
+                if entailment_prob > 0.75 and contradiction_prob < 0.2:
+                    max_entailment_score = max(max_entailment_score, entailment_prob)
+
+        # Decision based on the maximum entailment score
+        return "S" if max_entailment_score >= 0.75 else "NS"
 
 # OPTIONAL
 class DependencyRecallThresholdFactChecker(object):
