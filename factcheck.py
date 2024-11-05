@@ -75,12 +75,14 @@ class AlwaysEntailedFactChecker(object):
 
 
 class WordRecallThresholdFactChecker(FactChecker):
-    def __init__(self, threshold: float = 0.3):
+    def __init__(self, threshold: float = 0.27):
         self.threshold = threshold
 
     def preprocess(self, text: str):
-        # Basic preprocessing to tokenize and normalize text, removing very common words
-        return [word for word in re.findall(r'\b\w+\b', text.lower()) if word not in {"is", "the", "a", "and", "of"}]
+        # Basic tokenization, removing very common words
+        stop_words = {"is", "the", "a", "and", "of"}
+        tokens = re.findall(r'\b\w+\b', text.lower())
+        return [word for word in tokens if word not in stop_words]
 
     def vectorize(self, tokens: List[str]) -> Dict[str, int]:
         # Count occurrences of each word
