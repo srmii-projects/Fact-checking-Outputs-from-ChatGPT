@@ -8,6 +8,9 @@ import spacy
 from transformers import AutoTokenizer, AutoModelForSequenceClassification
 from collections import Counter, defaultdict
 import re, math
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from nltk.stem import PorterStemmer
 
 import nltk
 from nltk.tokenize import sent_tokenize
@@ -85,43 +88,42 @@ class AlwaysEntailedFactChecker(object):
         return "S"
 
 
-class WordRecallThresholdFactChecker(FactChecker):
-    def __init__(self, threshold: float = 0.27):
-        self.threshold = threshold
+class WordRecallThresholdFactChecker:
+    def __init__(self, high_threshold=0.6, moderate_threshold=0.6):
+        self.high_threshold = high_threshold  # High threshold for immediate "S"
+        self.moderate_threshold = moderate_threshold  # Moderate threshold for final decision
+        self.stop_words = set(stopwords.words("english"))
+        self.stemmer = PorterStemmer()
 
-    def preprocess(self, text: str):
-        # Basic tokenization, removing very common words
-        stop_words = {"is", "the", "a", "and", "of"}
-        tokens = re.findall(r'\b\w+\b', text.lower())
-        return [word for word in tokens if word not in stop_words]
+    def preprocess(self, text):
+        # Tokenize, remove stopwords, and apply stemming
+        tokens = word_tokenize(text.lower())
+        filtered_tokens = [self.stemmer.stem(word) for word in tokens if word.isalnum() and word not in self.stop_words]
+        return set(filtered_tokens)
 
-    def vectorize(self, tokens: List[str]) -> Dict[str, int]:
-        # Count occurrences of each word
-        return Counter(tokens)
+    def calculate_precision_overlap(self, fact_tokens, passage_tokens):
+        # Calculate precision-based overlap: fraction of fact words in the passage
+        match_count = sum(1 for word in fact_tokens if word in passage_tokens)
+        return match_count / len(fact_tokens) if fact_tokens else 0
 
-    def cosine_similarity(self, vec1: Dict[str, int], vec2: Dict[str, int]) -> float:
-        # Compute cosine similarity manually
-        intersection = set(vec1.keys()) & set(vec2.keys())
-        numerator = sum([vec1[x] * vec2[x] for x in intersection])
-
-        sum1 = sum([val**2 for val in vec1.values()])
-        sum2 = sum([val**2 for val in vec2.values()])
-        denominator = np.sqrt(sum1) * np.sqrt(sum2)
-
-        return numerator / denominator if denominator != 0 else 0.0
-
-    def predict(self, fact: str, passages: List[dict]) -> str:
+    def predict(self, fact: str, passages: list) -> str:
         fact_tokens = self.preprocess(fact)
-        fact_vector = self.vectorize(fact_tokens)
-        
-        max_similarity = 0.0
+        max_overlap_score = 0.0
+
+        # Calculate overlap score for each passage
         for passage in passages:
             passage_tokens = self.preprocess(passage['text'])
-            passage_vector = self.vectorize(passage_tokens)
-            similarity = self.cosine_similarity(fact_vector, passage_vector)
-            max_similarity = max(max_similarity, similarity)
+            overlap_score = self.calculate_precision_overlap(fact_tokens, passage_tokens)
+            
+            # Immediate classification if overlap meets high threshold
+            if overlap_score >= self.high_threshold:
+                return "S"
+            
+            # Track maximum overlap score
+            max_overlap_score = max(max_overlap_score, overlap_score)
 
-        return "S" if max_similarity >= self.threshold else "NS"
+        # Final decision based on moderate threshold
+        return "S" if max_overlap_score >= self.moderate_threshold else "NS"
 
 
 class EntailmentFactChecker:
