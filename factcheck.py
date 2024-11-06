@@ -10,6 +10,7 @@ from collections import Counter, defaultdict
 import re, math
 
 import nltk
+from nltk.tokenize import sent_tokenize
 
 class FactExample:
     """
@@ -31,25 +32,31 @@ class FactExample:
 
 
 class EntailmentModel:
-    def __init__(self, model, tokenizer):
+    def __init__(self, model, tokenizer, max_length=256):
         self.model = model
         self.tokenizer = tokenizer
+        self.max_length = max_length
 
-    def check_entailment(self, premise: str, hypothesis: str):
+    def check_entailment_batch(self, premises: list, hypothesis: str):
         with torch.no_grad():
-            # Tokenize the premise and hypothesis
-            inputs = self.tokenizer(premise, hypothesis, return_tensors='pt', truncation=True, padding=True)
-            # Get the model's prediction
+            # Tokenize premises and hypothesis in batches
+            inputs = self.tokenizer(
+                premises, [hypothesis] * len(premises),
+                return_tensors='pt',
+                truncation=True,
+                padding=True,
+                max_length=self.max_length
+            )
+            # Get model predictions
             outputs = self.model(**inputs)
             logits = outputs.logits
-            # Extract probabilities
-            entailment_score = torch.softmax(logits, dim=-1).squeeze().cpu().numpy()
-        # Clean up
+            # Calculate entailment probabilities
+            entailment_scores = torch.softmax(logits, dim=-1)[:, 0].cpu().numpy()  # Entailment scores
+        # Cleanup
         del inputs, outputs, logits
         gc.collect()
         
-        # Return probability scores for entailment, neutral, contradiction
-        return entailment_score
+        return entailment_scores  # Return only entailment scores for efficiency
 
 
 class FactChecker(object):
@@ -117,27 +124,40 @@ class WordRecallThresholdFactChecker(FactChecker):
         return "S" if max_similarity >= self.threshold else "NS"
 
 
-class EntailmentFactChecker(object):
-    def __init__(self, ent_model):
+class EntailmentFactChecker:
+    def __init__(self, ent_model, batch_size=4, early_exit_threshold=0.75, final_threshold=0.55):
         self.ent_model = ent_model
+        self.batch_size = batch_size
+        self.early_exit_threshold = early_exit_threshold
+        self.final_threshold = final_threshold
 
     def predict(self, fact: str, passages: list) -> str:
-        max_entailment_score = 0.0  # Keep track of the highest entailment score
+        max_entailment_score = 0.0  # Track the highest entailment score
         
         for passage in passages:
-            sentences = passage['text'].split('.')  # Basic sentence split on periods
-            for sentence in sentences:
-                if sentence.strip():  # Only process non-empty sentences
-                    # Obtain probabilities for entailment, neutral, contradiction
-                    entailment_prob, neutral_prob, contradiction_prob = self.ent_model.check_entailment(sentence, fact)
-                    # Update max entailment score
-                    max_entailment_score = max(max_entailment_score, entailment_prob)
-                    # Early exit if we reach a high confidence in entailment
-                    if entailment_prob > 0.7:  # threshold for high-confidence entailment
+            sentences = sent_tokenize(passage['text'])
+            top_scores = []  # Track top entailment scores for averaging
+            
+            # Process sentences in batches
+            for i in range(0, len(sentences), self.batch_size):
+                batch = [sentence for sentence in sentences[i:i + self.batch_size] if sentence.strip()]
+                entailment_scores = self.ent_model.check_entailment_batch(batch, fact)
+                
+                # Check for early exit on high-confidence entailment
+                for score in entailment_scores:
+                    if score > self.early_exit_threshold:
                         return "S"
-        
-        # If no sentence has high entailment probability, return "NS"
-        return "S" if max_entailment_score > 0.5 else "NS"
+                    top_scores.append(score)
+                
+                # Keep only top 3 scores for final averaging to reduce noise
+                top_scores = sorted(top_scores, reverse=True)[:3]
+            
+            # Update max_entailment_score using a weighted average of top scores
+            if top_scores:
+                max_entailment_score = max(max_entailment_score, sum(top_scores) / len(top_scores))
+
+        # Final decision with adjusted threshold
+        return "S" if max_entailment_score > self.final_threshold else "NS"
 
 # OPTIONAL
 class DependencyRecallThresholdFactChecker(object):
